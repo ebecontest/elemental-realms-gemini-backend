@@ -18,9 +18,10 @@ app.use(express.json({ limit: "2mb" }));
 const SYSTEM_PROMPT = `
 You are the creative production assistant inside ELEMENTAL REALMS Art Studio.
 
-You help create colourful anime fantasy pixel-art assets for a 2.5D action RPG.
+Help create colourful anime fantasy pixel-art assets
+for a 2.5D action RPG.
 
-The world has seven elements:
+The seven elements are:
 Fire, Water, Leaf, Lightning, Chaos, Light, and Earth.
 
 Help with:
@@ -28,14 +29,14 @@ Help with:
 - Pixel-art sprites and sprite sheets
 - Animation frame specifications
 - Game environments and props
-- Colour palettes and visual direction
+- Colour palettes
 - Image-generation prompts
-- Game-art production workflows
 - Unity and Godot asset specifications
+- Game development and debugging
 
-Give clear, detailed and practical answers.
+Give practical, detailed and clear answers.
 Use headings and lists when useful.
-Do not claim to have edited or exported files unless an actual tool did so.
+Never claim to have exported files unless an actual tool did so.
 `;
 
 const sleep = ms =>
@@ -45,13 +46,13 @@ const sleep = ms =>
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "elemental-realms-openai-backend"
+    service: "elemental-realms-gemini-backend"
   });
 });
 
-// MODEL INFORMATION
+// MODEL LIST
 app.get("/api/models", (_req, res) => {
-  const model = process.env.OPENAI_MODEL || "gpt-5.5";
+  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
   res.json({
     count: 1,
@@ -62,79 +63,49 @@ app.get("/api/models", (_req, res) => {
   });
 });
 
-// OPENAI REQUEST WITH RETRIES
-async function requestOpenAI(payload) {
-  const apiKey = process.env.OPENAI_API_KEY;
-
-  if (!apiKey) {
-    const error = new Error("OPENAI_API_KEY is missing.");
-    error.status = 503;
-    throw error;
-  }
-
+// GEMINI REQUEST WITH RETRIES
+async function requestGemini(url, options) {
   let lastError;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    let response;
-    let data;
-
     try {
-      response = await fetch(
-        "https://api.openai.com/v1/responses",
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
-        }
-      );
+      const response = await fetch(url, options);
+      const data = await response.json().catch(() => ({}));
 
-      data = await response.json().catch(() => ({}));
+      if (response.ok) return data;
 
-    } catch (networkError) {
       lastError = {
-        status: 502,
-        message: networkError.message
+        status: response.status,
+        message: data.error?.message || "Unknown Gemini error"
       };
 
-      console.error("OpenAI network error:", lastError);
+      console.error("Gemini API error:", {
+        attempt,
+        ...lastError
+      });
+
+      const temporary = [
+        429, 500, 502, 503, 504
+      ].includes(response.status);
+
+      if (!temporary || attempt === 3) break;
+
+    } catch (error) {
+      lastError = {
+        status: 502,
+        message: error.message
+      };
+
+      console.error("Gemini network error:", error.message);
 
       if (attempt === 3) break;
-
-      await sleep(1500 * (2 ** (attempt - 1)));
-      continue;
-    }
-
-    if (response.ok) {
-      return data;
-    }
-
-    lastError = {
-      status: response.status,
-      message: data.error?.message || "Unknown OpenAI error"
-    };
-
-    console.error("OpenAI API error:", {
-      attempt,
-      status: lastError.status,
-      message: lastError.message
-    });
-
-    const temporary = [
-      429, 500, 502, 503, 504
-    ].includes(response.status);
-
-    if (!temporary || attempt === 3) {
-      break;
     }
 
     await sleep(1500 * (2 ** (attempt - 1)));
   }
 
   const error = new Error(
-    lastError?.message || "OpenAI request failed."
+    lastError?.message || "Gemini request failed."
   );
 
   error.status = lastError?.status || 502;
@@ -145,6 +116,14 @@ async function requestOpenAI(payload) {
 // CHAT ENDPOINT
 app.post("/api/chat", async (req, res) => {
   try {
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    if (!apiKey) {
+      return res.status(503).json({
+        error: "GEMINI_API_KEY is missing."
+      });
+    }
+
     const message =
       typeof req.body?.message === "string"
         ? req.body.message.trim()
@@ -166,49 +145,60 @@ app.post("/api/chat", async (req, res) => {
       ? req.body.history.slice(-12)
       : [];
 
-    // Use plain string content for both user and assistant.
-    // This avoids incorrect input_text/output_text type errors.
-    const input = history
+    const contents = history
       .filter(item =>
         ["user", "assistant"].includes(item?.role) &&
         typeof item?.text === "string"
       )
       .map(item => ({
-        role: item.role,
-        content: item.text.slice(0, 8000)
+        role: item.role === "assistant" ? "model" : "user",
+        parts: [{
+          text: item.text.slice(0, 8000)
+        }]
       }));
 
-    // Add the latest user message.
-    input.push({
+    contents.push({
       role: "user",
-      content: message
+      parts: [{
+        text: message
+      }]
     });
 
     const model =
-      process.env.OPENAI_MODEL || "gpt-5.5";
+      process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
-    const data = await requestOpenAI({
-      model,
-      instructions: SYSTEM_PROMPT,
-      input,
-      max_output_tokens: 1800,
-      store: false
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+    const data = await requestGemini(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{
+            text: SYSTEM_PROMPT
+          }]
+        },
+        contents,
+        generationConfig: {
+          maxOutputTokens: 1800
+        }
+      })
     });
 
-    // Extract generated text from Responses API output.
-    const answer = (data.output || [])
-      .flatMap(item => item.content || [])
-      .filter(item => item.type === "output_text")
-      .map(item => item.text || "")
+    const answer = (data.candidates?.[0]?.content?.parts || [])
+      .map(part => part.text || "")
       .join("\n");
 
     if (!answer) {
-      console.error(
-        "OpenAI returned an empty response."
-      );
+      console.error("Gemini returned empty response:", {
+        finishReason: data.candidates?.[0]?.finishReason
+      });
 
       return res.status(502).json({
-        error: "OpenAI returned an empty response. Please try again."
+        error: "Gemini returned an empty response. Please try again."
       });
     }
 
@@ -217,27 +207,23 @@ app.post("/api/chat", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Chat request failed:", {
+    console.error("Gemini chat failed:", {
       status: error.status,
       message: error.message
     });
 
-    const status = [
-      401, 429, 503
-    ].includes(error.status)
+    const status = [429, 503].includes(error.status)
       ? error.status
       : 502;
 
     let message;
 
-    if (status === 401) {
-      message = "OpenAI API key is invalid or unauthorized.";
-    } else if (status === 429) {
-      message = "OpenAI usage limit reached. Check API billing.";
+    if (status === 429) {
+      message = "Gemini API limit reached. Please try again later.";
     } else if (status === 503) {
-      message = "OpenAI backend is not configured or unavailable.";
+      message = "Gemini is temporarily unavailable.";
     } else {
-      message = "OpenAI request failed. Check Render logs.";
+      message = "Gemini request failed. Check Render logs.";
     }
 
     return res.status(status).json({
@@ -249,6 +235,6 @@ app.post("/api/chat", async (req, res) => {
 // START SERVER
 app.listen(port, () => {
   console.log(
-    `ELEMENTAL REALMS OpenAI backend listening on ${port}`
+    `ELEMENTAL REALMS Gemini backend listening on ${port}`
   );
 });
