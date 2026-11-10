@@ -10,4 +10,4 @@ services:
       - key: ALLOWED_ORIGIN
         value: https://ebecontest.github.io
       - key: GEMINI_MODEL
-        value: gemini-2.5-flasha
+        value: gemini-2.5-flash
