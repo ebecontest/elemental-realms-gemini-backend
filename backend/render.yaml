@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: elemental-realms-gemini
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGIN
+        value: https://ebecontest.github.io
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flasha
